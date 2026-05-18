@@ -270,10 +270,9 @@ def show_welcome():
 def show_entry():
     st.header("📝 录入错题")
 
-    if "editable_question" not in st.session_state:
-        st.session_state.editable_question = ""
-    if "ocr_raw" not in st.session_state:
-        st.session_state.ocr_raw = ""
+    # 初始化 session_state
+    if "ocr_result" not in st.session_state:
+        st.session_state.ocr_result = ""          # 存储识别结果
     if "processing" not in st.session_state:
         st.session_state.processing = False
     if "last_file" not in st.session_state:
@@ -285,29 +284,49 @@ def show_entry():
     with col1:
         if uploaded_file:
             st.image(uploaded_file, width=300)
+            # 检测新文件，清空旧的识别结果
             if st.session_state.last_file != uploaded_file.name:
-                st.session_state.editable_question = ""
-                st.session_state.ocr_raw = ""
+                st.session_state.ocr_result = ""
                 st.session_state.last_file = uploaded_file.name
+            
+            # 识别按钮
             if st.button("🔍 识别图片文字", disabled=st.session_state.processing):
                 st.session_state.processing = True
                 with st.spinner("识别中，请稍候..."):
                     raw = recognize_text_from_image(uploaded_file.getvalue())
-                    st.session_state.ocr_raw = raw
-                    st.session_state.editable_question = raw
+                    if raw and "未识别" not in raw:
+                        st.session_state.ocr_result = raw
+                        st.success("✅ 识别成功！请复制下面的识别结果，粘贴到右侧编辑框中。")
+                    else:
+                        st.error(f"识别失败：{raw}")
                 st.session_state.processing = False
                 st.rerun()
+            
+            # 显示识别结果（带复制按钮的效果）
+            if st.session_state.ocr_result:
+                st.markdown("**📋 识别结果（点击下方框内全选复制）**")
+                st.text_area(
+                    "识别文本",
+                    value=st.session_state.ocr_result,
+                    height=150,
+                    key="ocr_display",
+                    help="点击文本框内，按 Ctrl+A 全选，然后 Ctrl+C 复制"
+                )
+                st.info("💡 提示：选中上面的文字，按 Ctrl+C 复制，然后粘贴到右侧编辑框")
 
     with col2:
         st.subheader("✏️ 可编辑题目内容")
-        edited = st.text_area("请核对并修改题目", value=st.session_state.editable_question, height=250, key="question_editor")
-        st.session_state.editable_question = edited
+        edited = st.text_area(
+            "请在此处粘贴或手动输入题目", 
+            value="", 
+            height=300, 
+            key="question_editor",
+            help="可以手动输入题目，或从左侧复制识别结果粘贴到这里"
+        )
 
-    if st.session_state.ocr_raw:
-        st.info(f"📌 原始识别结果：{st.session_state.ocr_raw[:200]}...")
-
+    # 录入表单
     with st.form("entry_form"):
-        question_text = st.session_state.editable_question
+        question_text = edited  # 直接使用编辑框的内容
         wrong_answer = st.text_input("❌ 你的错误答案")
         correct_answer = st.text_input("✅ 正确答案")
         knowledge_options = ["四则运算", "小数意义", "三角形", "小数加减法", "观察物体", "运算定律", "统计", "数学广角", "其他"]
@@ -329,8 +348,8 @@ def show_entry():
                     with open(img_path, "wb") as f:
                         f.write(uploaded_file.getvalue())
                 add_question(question_text, wrong_answer, correct_answer, knowledge_point, error_type, img_path)
-                st.session_state.editable_question = ""
-                st.session_state.ocr_raw = ""
+                # 清空状态
+                st.session_state.ocr_result = ""
                 st.session_state.last_file = None
                 st.success("错题已保存！")
                 st.rerun()
