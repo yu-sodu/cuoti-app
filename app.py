@@ -10,16 +10,24 @@ import pandas as pd
 from datetime import timedelta
 import numpy as np
 import easyocr
+import re
 
 # ========== 页面配置 ==========
 st.set_page_config(page_title="余悦错题本", page_icon="📚", layout="wide")
 
-# 自定义CSS（增加欢迎动画和卡片样式）
+# 自定义CSS
 st.markdown("""
 <style>
     .stApp { background-color: #f9f7f3; }
     .stButton > button { background-color: #c8e7d5; color: #2c5f2d; border-radius: 15px; font-weight: bold; }
     .question-card { background-color: white; border-radius: 20px; padding: 20px; margin-bottom: 20px; border-left: 8px solid #ffb347; }
+    .solve-card {
+        background: linear-gradient(135deg, #e8f4f8 0%, #d1e9f0 100%);
+        border-radius: 20px;
+        padding: 20px;
+        margin-top: 20px;
+        border-left: 8px solid #2c5f2d;
+    }
     .welcome-card {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         border-radius: 30px;
@@ -29,15 +37,8 @@ st.markdown("""
         margin-bottom: 2rem;
         box-shadow: 0 10px 25px rgba(0,0,0,0.1);
     }
-    .welcome-title {
-        font-size: 3rem;
-        font-weight: bold;
-        margin-bottom: 0.5rem;
-    }
-    .welcome-subtitle {
-        font-size: 1.3rem;
-        opacity: 0.9;
-    }
+    .welcome-title { font-size: 3rem; font-weight: bold; margin-bottom: 0.5rem; }
+    .welcome-subtitle { font-size: 1.3rem; opacity: 0.9; }
     .feature-card {
         background-color: white;
         border-radius: 20px;
@@ -68,17 +69,42 @@ def init_db():
         knowledge_point TEXT,
         error_type TEXT,
         image_path TEXT,
-        created_at TIMESTAMP)''')
+        created_at TIMESTAMP,
+        solution TEXT DEFAULT '')''')
+    
+    # 检查并添加 solution 字段（兼容旧数据库）
+    c.execute("PRAGMA table_info(wrong_questions)")
+    columns = [col[1] for col in c.fetchall()]
+    if "solution" not in columns:
+        c.execute('ALTER TABLE wrong_questions ADD COLUMN solution TEXT DEFAULT ""')
+    
     conn.commit()
     conn.close()
 
-def add_question(question_text, wrong_answer, correct_answer, knowledge_point, error_type, image_path):
+def add_question(question_text, wrong_answer, correct_answer, knowledge_point, error_type, image_path, solution=""):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('INSERT INTO wrong_questions (question_text, wrong_answer, correct_answer, knowledge_point, error_type, image_path, created_at) VALUES (?,?,?,?,?,?,?)',
-              (question_text, wrong_answer, correct_answer, knowledge_point, error_type, image_path, datetime.datetime.now()))
+    c.execute('''INSERT INTO wrong_questions 
+        (question_text, wrong_answer, correct_answer, knowledge_point, error_type, image_path, created_at, solution) 
+        VALUES (?,?,?,?,?,?,?,?)''',
+              (question_text, wrong_answer, correct_answer, knowledge_point, error_type, image_path, datetime.datetime.now(), solution))
     conn.commit()
     conn.close()
+
+def update_solution(qid, solution):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('UPDATE wrong_questions SET solution = ? WHERE id = ?', (solution, qid))
+    conn.commit()
+    conn.close()
+
+def get_solution(qid):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT solution FROM wrong_questions WHERE id = ?', (qid,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else ""
 
 def get_all_questions():
     conn = sqlite3.connect(DB_PATH)
@@ -134,6 +160,36 @@ def recognize_text_from_image(image_bytes):
         st.error(f"OCR错误: {e}")
         return ""
 
+# ========== AI 解题函数 ==========
+def solve_math_problem(question_text, wrong_answer=None, error_type=None):
+    if not question_text:
+        return "请先输入题目内容"
+    
+    wrong_hint = f"\n注意：学生的错误答案是「{wrong_answer}」，请针对这个错误进行重点讲解。" if wrong_answer else ""
+    error_hint = f"\n学生的错误原因：{error_type}，请针对这个原因给出改进建议。" if error_type else ""
+    
+    prompt = f"""你是一位耐心、亲切的小学数学老师。请为下面这道数学题提供详细的解题思路和步骤。
+
+题目：{question_text}{wrong_hint}{error_hint}
+
+要求：
+1. 用小学生能理解的语言讲解，分步骤说明
+2. 先分析题目考查的知识点
+3. 然后给出正确的解题步骤
+4. 最后总结易错点和解题技巧
+5. 整体语气要鼓励、积极
+
+请按以下格式输出：
+📚 **知识点**：...
+💡 **解题思路**：...
+📝 **详细步骤**：...
+⚠️ **易错提醒**：...
+🎯 **总结**：...
+"""
+    messages = [{"role": "user", "content": prompt}]
+    result = call_deepseek_chat(messages, temperature=0.5)
+    return result if result else "AI 解题服务暂时不可用，请稍后再试。"
+
 # ========== 辅助函数 ==========
 def generate_similar_questions(question, num=3):
     if not question: return []
@@ -145,14 +201,22 @@ def generate_weekly_review(questions_week):
     if len(questions_week)==0: return "本周无错题"
     review = "## 本周错题回顾\n\n"
     for q in questions_week:
-        _, qtext, wans, cans, kp, err, _, ct = q
+        _, qtext, wans, cans, kp, err, _, ct, _ = q
         review += f"**题目**: {qtext}\n**错误答案**: {wans}\n**正确答案**: {cans}\n**知识点**: {kp} | **错误原因**: {err}\n\n"
     return review
 
 def generate_two_week_paper(questions_two_weeks):
     if len(questions_two_weeks)==0: return "过去两周无错题"
     qlist = "\n".join([f"{i+1}. {q[1]}" for i,q in enumerate(questions_two_weeks)])
-    prompt = f"根据以下错题，生成一套10道题的综合练习卷（含答案）：\n{qlist}"
+    prompt = f"""根据以下错题，生成一套10道题的综合练习卷（含答案）。要求：
+1. 题目难度适中，题型多样（填空题、选择题、计算题、应用题等）
+2. 每道题都要标注对应的知识点
+3. 最后附上答案
+4. 使用清晰易读的格式
+
+原始错题列表：
+{qlist}
+"""
     return call_deepseek_chat([{"role": "user", "content": prompt}], temperature=0.7) or "生成失败"
 
 def generate_mind_map(questions):
@@ -170,12 +234,359 @@ def generate_memory_mnemonics(questions):
     prompt = f"为知识点{', '.join(top)}编写记忆口诀（每个口诀不超过4句）"
     return call_deepseek_chat([{"role": "user", "content": prompt}], temperature=0.8) or "生成失败"
 
-# ========== 欢迎页面 ==========
+# ========== 试卷打印辅助函数 ==========
+def convert_to_printable_html(paper_text, title="综合练习卷"):
+    """将 AI 生成的试卷内容转换为适合打印的 HTML 格式"""
+    html_content = paper_text
+    
+    # 处理 Markdown 标题
+    html_content = re.sub(r'^# (.*?)$', r'<h1>\1</h1>', html_content, flags=re.MULTILINE)
+    html_content = re.sub(r'^## (.*?)$', r'<h2>\1</h2>', html_content, flags=re.MULTILINE)
+    html_content = re.sub(r'^### (.*?)$', r'<h3>\1</h3>', html_content, flags=re.MULTILINE)
+    
+    # 处理粗体
+    html_content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html_content)
+    
+    # 处理列表项
+    html_content = re.sub(r'^\d+\.\s+(.*?)$', r'<li>\1</li>', html_content, flags=re.MULTILINE)
+    html_content = re.sub(r'^- (.*?)$', r'<li>\1</li>', html_content, flags=re.MULTILINE)
+    
+    # 将连续的列表项包装在 <ul> 或 <ol> 中
+    html_content = re.sub(r'(<li>.*?</li>\n?)+', lambda m: f'<ul>{m.group(0)}</ul>', html_content)
+    
+    # 处理段落
+    lines = html_content.split('\n')
+    processed_lines = []
+    for line in lines:
+        line = line.strip()
+        if line and not line.startswith('<'):
+            processed_lines.append(f'<p>{line}</p>')
+        elif line:
+            processed_lines.append(line)
+    
+    html_content = '\n'.join(processed_lines)
+    
+    return f'''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>{title}</title>
+    <style>
+        @media print {{
+            body {{ margin: 2cm; font-size: 12pt; }}
+            .no-print {{ display: none; }}
+            h1, h2, h3 {{ page-break-after: avoid; }}
+            ul, ol, p {{ page-break-inside: avoid; }}
+        }}
+        @media screen {{
+            body {{ max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f5f5f5; }}
+            .paper {{ background-color: white; padding: 40px; border-radius: 10px; box-shadow: 0 5px 20px rgba(0,0,0,0.1); }}
+        }}
+        body {{ font-family: "Microsoft YaHei", "SimHei", "PingFang SC", sans-serif; line-height: 1.6; color: #333; }}
+        h1 {{ text-align: center; color: #2c5f2d; margin-bottom: 30px; }}
+        h2 {{ color: #2c5f2d; border-bottom: 2px solid #c8e7d5; padding-bottom: 8px; margin-top: 25px; }}
+        h3 {{ color: #ffb347; margin-top: 20px; }}
+        .answer-section {{ margin-top: 40px; padding: 20px; background-color: #f9f7f3; border-left: 5px solid #ffb347; }}
+        .no-print {{ text-align: center; margin-top: 20px; }}
+        button {{ background-color: #2c5f2d; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 14px; }}
+        button:hover {{ background-color: #1e401f; }}
+    </style>
+</head>
+<body>
+    <div class="paper">
+        {html_content}
+    </div>
+    <div class="no-print" style="text-align: center; margin-top: 20px;">
+        <button onclick="window.print();">🖨️ 打印试卷</button>
+        <button onclick="window.close();" style="margin-left: 10px;">关闭窗口</button>
+    </div>
+</body>
+</html>'''
+
+# ========== 界面函数 ==========
+def show_entry():
+    st.header("📝 录入错题")
+
+    if "ocr_result" not in st.session_state:
+        st.session_state.ocr_result = ""
+    if "processing" not in st.session_state:
+        st.session_state.processing = False
+    if "last_file" not in st.session_state:
+        st.session_state.last_file = None
+    if "current_question" not in st.session_state:
+        st.session_state.current_question = ""
+    if "ai_solution" not in st.session_state:
+        st.session_state.ai_solution = ""
+    if "custom_error" not in st.session_state:
+        st.session_state.custom_error = ""
+
+    uploaded_file = st.file_uploader("🖼️ 上传题目图片", type=["jpg","jpeg","png"])
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if uploaded_file:
+            st.image(uploaded_file, width=300)
+            if st.session_state.last_file != uploaded_file.name:
+                st.session_state.ocr_result = ""
+                st.session_state.last_file = uploaded_file.name
+            
+            if st.button("🔍 识别图片文字", disabled=st.session_state.processing):
+                st.session_state.processing = True
+                with st.spinner("识别中，请稍候..."):
+                    raw = recognize_text_from_image(uploaded_file.getvalue())
+                    if raw and "未识别" not in raw:
+                        st.session_state.ocr_result = raw
+                        st.success("✅ 识别成功！请复制下面的识别结果，粘贴到右侧编辑框中。")
+                    else:
+                        st.error(f"识别失败：{raw}")
+                st.session_state.processing = False
+                st.rerun()
+            
+            if st.session_state.ocr_result:
+                st.markdown("**📋 识别结果（点击下方框内全选复制）**")
+                st.text_area("识别文本", value=st.session_state.ocr_result, height=150, key="ocr_display")
+                st.info("💡 提示：选中上面的文字，按 Ctrl+A 全选，然后 Ctrl+C 复制")
+
+    with col2:
+        st.subheader("✏️ 可编辑题目内容")
+        edited = st.text_area("请在此处粘贴或手动输入题目", value=st.session_state.current_question, height=150, key="question_editor")
+        st.session_state.current_question = edited
+
+    # AI 解题窗口
+    if st.session_state.current_question:
+        st.markdown("---")
+        st.subheader("🤖 AI 智能解题助手")
+        
+        col_solve1, col_solve2 = st.columns([3, 1])
+        with col_solve1:
+            if st.button("🎓 开始解题", key="solve_btn", use_container_width=True):
+                with st.spinner("AI 老师正在思考中，请稍候..."):
+                    solution = solve_math_problem(st.session_state.current_question)
+                    st.session_state.ai_solution = solution
+                    st.rerun()
+        with col_solve2:
+            if st.session_state.ai_solution:
+                if st.button("📋 复制解题思路", key="copy_solution"):
+                    st.success("已复制到剪贴板！")
+        
+        if st.session_state.ai_solution:
+            st.markdown(f"""
+            <div class="solve-card">
+                {st.session_state.ai_solution}
+            </div>
+            """, unsafe_allow_html=True)
+
+    # 题目信息输入
+    wrong_answer = st.text_input("❌ 你的错误答案")
+    correct_answer = st.text_input("✅ 正确答案")
+    
+    knowledge_options = ["四则运算", "小数意义", "三角形", "小数加减法", "观察物体", "运算定律", "统计", "数学广角", "其他"]
+    knowledge_point = st.selectbox("🏷️ 知识点标签", knowledge_options)
+    if knowledge_point == "其他":
+        knowledge_point = st.text_input("请输入自定义知识点")
+    
+    # 错误原因选择
+    st.markdown("**⚠️ 错误原因**")
+    error_options = ["概念错误", "计算失误", "审题不清", "其他"]
+    selected_error = st.radio(
+        "选择错误类型",
+        error_options,
+        horizontal=True,
+        key="error_type_radio",
+        label_visibility="collapsed"
+    )
+    
+    if selected_error == "其他":
+        custom_error = st.text_input(
+            "请输入具体的错误原因",
+            placeholder="例如：单位换算错误、公式记错、图形画错等",
+            key="custom_error_input"
+        )
+        st.session_state.custom_error = custom_error
+        if custom_error:
+            final_error_type = f"其他：{custom_error}"
+        else:
+            final_error_type = "其他（未填写具体原因）"
+    else:
+        final_error_type = selected_error
+        st.session_state.custom_error = ""
+    
+    st.info(f"📌 当前错误原因：{final_error_type}")
+    
+    # 保存按钮
+    col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
+    with col_btn2:
+        if st.button("📌 保存错题", key="save_btn", use_container_width=True):
+            question_text = st.session_state.current_question
+            
+            if not question_text:
+                st.warning("请填写题目文本")
+            elif not correct_answer:
+                st.warning("请填写正确答案")
+            else:
+                img_path = None
+                if uploaded_file:
+                    img_path = os.path.join(UPLOAD_DIR, uploaded_file.name)
+                    with open(img_path, "wb") as f:
+                        f.write(uploaded_file.getvalue())
+                add_question(question_text, wrong_answer, correct_answer, knowledge_point, final_error_type, img_path, st.session_state.ai_solution)
+                st.session_state.current_question = ""
+                st.session_state.ocr_result = ""
+                st.session_state.ai_solution = ""
+                st.session_state.last_file = None
+                st.session_state.custom_error = ""
+                st.success("错题已保存！")
+                st.rerun()
+
+def show_list():
+    st.header("📚 我的错题本")
+    questions = get_all_questions()
+    if not questions:
+        st.info("暂无错题，快去录入吧～")
+        return
+    for q in questions:
+        if len(q) >= 9:
+            qid, qtext, wans, cans, kp, err, img, ct, solution = q
+        else:
+            qid, qtext, wans, cans, kp, err, img, ct = q
+            solution = ""
+        time_str = datetime.datetime.strptime(ct, "%Y-%m-%d %H:%M:%S.%f").strftime("%Y-%m-%d %H:%M")
+        with st.container():
+            st.markdown(f"""
+            <div class="question-card">
+                <h3>📌 错题 #{qid}</h3>
+                <p><strong>题目：</strong>{qtext}</p>
+                <p><strong>错误答案：</strong>{wans or '未填写'}</p>
+                <p><strong>正确答案：</strong>{cans}</p>
+                <p><strong>知识点：</strong>{kp} &nbsp; <strong>错误原因：</strong>{err}</p>
+                <p><strong>时间：</strong>{time_str}</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if solution:
+                with st.expander("📖 查看解题思路"):
+                    st.markdown(solution)
+            else:
+                if st.button(f"🤖 AI 解题", key=f"solve_{qid}"):
+                    with st.spinner("AI 老师正在解题..."):
+                        new_solution = solve_math_problem(qtext, wans, err)
+                        if new_solution:
+                            update_solution(qid, new_solution)
+                            st.success("解题思路已生成！请刷新页面查看。")
+                            st.rerun()
+                        else:
+                            st.warning("生成失败，请稍后再试。")
+            
+            col1, col2 = st.columns([1, 5])
+            with col1:
+                if st.button(f"💡 举一反三", key=f"sim_btn_{qid}"):
+                    with st.spinner("生成中..."):
+                        sims = generate_similar_questions(qtext)
+                        if sims:
+                            st.session_state[f"sim_result_{qid}"] = sims
+                        else:
+                            st.warning("生成失败")
+            with col2:
+                if st.button(f"🗑️ 删除", key=f"del_{qid}"):
+                    delete_question(qid)
+                    st.rerun()
+            if f"sim_result_{qid}" in st.session_state:
+                st.markdown("**✨ 举一反三**")
+                for i, s in enumerate(st.session_state[f"sim_result_{qid}"],1):
+                    st.markdown(f"{i}. {s}")
+                st.markdown("---")
+        st.divider()
+
+def show_generate():
+    st.header("📚 智能复习与总结")
+    tab1, tab2, tab3, tab4 = st.tabs(["每周回顾", "两周综合卷", "思维导图", "记忆口诀"])
+    
+    all_questions = get_all_questions()
+    if not all_questions:
+        for tab in [tab1, tab2, tab3, tab4]:
+            with tab: st.info("暂无错题数据")
+        return
+    
+    df = pd.DataFrame(all_questions, columns=["id","q","wa","ca","kp","err","img","ct","solution"])
+    df["ct"] = pd.to_datetime(df["ct"])
+    today = datetime.datetime.now()
+    start_week = (today - timedelta(days=today.weekday())).replace(hour=0,minute=0,second=0)
+    two_weeks_ago = today - timedelta(days=14)
+    week_q = df[(df["ct"]>=start_week) & (df["ct"]<=today)]
+    two_q = df[(df["ct"]>=two_weeks_ago) & (df["ct"]<=today)]
+    
+    with tab1:
+        if st.button("生成本周回顾"):
+            st.markdown(generate_weekly_review(week_q.to_records(index=False)))
+    
+    with tab2:
+        st.subheader("📄 两周综合练习卷")
+        
+        if st.button("📝 生成试卷", key="gen_paper"):
+            with st.spinner("AI 正在生成试卷，请稍候..."):
+                paper_text = generate_two_week_paper(two_q.to_records(index=False))
+                st.session_state.generated_paper = paper_text
+                st.session_state.paper_title = f"综合练习卷_{today.strftime('%Y%m%d')}"
+        
+        if st.session_state.get("generated_paper"):
+            st.markdown("---")
+            st.subheader("📖 试卷预览")
+            
+            with st.expander("点击展开查看试卷内容", expanded=True):
+                st.markdown(st.session_state.generated_paper)
+            
+            st.markdown("---")
+            st.subheader("📎 下载与打印")
+            
+            col_p1, col_p2, col_p3 = st.columns(3)
+            with col_p1:
+                st.download_button(
+                    label="📥 下载 Markdown 文件",
+                    data=st.session_state.generated_paper,
+                    file_name=f"{st.session_state.paper_title}.md",
+                    mime="text/markdown"
+                )
+            
+            with col_p2:
+                html_content = convert_to_printable_html(
+                    st.session_state.generated_paper, 
+                    st.session_state.paper_title
+                )
+                st.download_button(
+                    label="🖨️ 下载打印版 (HTML)",
+                    data=html_content,
+                    file_name=f"{st.session_state.paper_title}.html",
+                    mime="text/html"
+                )
+            
+            with col_p3:
+                html_content = convert_to_printable_html(
+                    st.session_state.generated_paper, 
+                    st.session_state.paper_title
+                )
+                st.markdown(f"""
+                <a href="data:text/html,{requests.utils.quote(html_content)}" 
+                   target="_blank" 
+                   style="background-color:#c8e7d5; color:#2c5f2d; padding:8px 16px; 
+                          border-radius:15px; text-decoration:none; font-weight:bold;">
+                    🖥️ 在新窗口打开打印版
+                </a>
+                """, unsafe_allow_html=True)
+            
+            st.info("💡 提示：点击「下载打印版」后，用浏览器打开文件，选择「文件 → 打印」或按 Ctrl+P 即可打印")
+    
+    with tab3:
+        if st.button("生成思维导图"):
+            code = generate_mind_map(all_questions)
+            st.markdown(f"```mermaid\n{code}\n```")
+    
+    with tab4:
+        if st.button("生成记忆口诀"):
+            st.markdown(generate_memory_mnemonics(all_questions))
+
 def show_welcome():
-    # 获取错题总数和本周错题数（用于统计展示）
     all_q = get_all_questions()
     total_errors = len(all_q)
-    # 本周错题数
     today = datetime.datetime.now()
     start_of_week = today - timedelta(days=today.weekday())
     start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -185,7 +596,6 @@ def show_welcome():
         if ct >= start_of_week:
             week_errors += 1
 
-    # 欢迎卡片
     st.markdown("""
     <div class="welcome-card">
         <div class="welcome-title">🌟 余悦，欢迎回来！ 🌟</div>
@@ -211,7 +621,6 @@ def show_welcome():
         </div>
         """, unsafe_allow_html=True)
     with col3:
-        # 目标进度：假设目标是95分，这里可显示一个模拟进度条
         st.markdown("""
         <div class="feature-card">
             <div class="feature-icon">🎯</div>
@@ -224,9 +633,9 @@ def show_welcome():
     st.markdown("---")
     st.subheader("✨ 今日学习建议")
     
-    # 调用AI生成个性化鼓励语（可选）
     if total_errors > 0:
-        advice_prompt = f"余悦是一位小学四年级学生，最近数学错题涉及的知识点有：{', '.join(list(set([q[4] for q in all_q]))[:3])}。请写一段简短、温暖、鼓励的话（不超过50字），提醒她今天可以重点复习哪些知识点。"
+        kp_list = list(set([q[4] for q in all_q]))[:3]
+        advice_prompt = f"余悦是一位小学四年级学生，最近数学错题涉及的知识点有：{', '.join(kp_list)}。请写一段简短、温暖、鼓励的话（不超过50字），提醒她今天可以重点复习哪些知识点。"
         advice = call_deepseek_chat([{"role": "user", "content": advice_prompt}], temperature=0.7)
         if advice:
             st.info(f"💡 {advice}")
@@ -251,183 +660,21 @@ def show_welcome():
             st.session_state.menu = "智能复习与总结"
             st.rerun()
 
-    # 显示最近错题预览
     if total_errors > 0:
         st.markdown("---")
         st.subheader("📌 最近3道错题回顾")
         recent = all_q[:3]
         for q in recent:
-            _, qtext, wans, cans, kp, err, _, ct = q
+            qtext = q[1]
             st.markdown(f"""
             <div class="question-card" style="padding: 10px;">
-                <strong>📖 {qtext[:80]}{'...' if len(qtext)>80 else ''}</strong><br>
-                ❌ 你的答案：{wans or '未填写'} &nbsp; ✅ 正确答案：{cans}<br>
-                🏷️ {kp} &nbsp; ⚠️ {err}
+                <strong>📖 {qtext[:80]}{'...' if len(qtext)>80 else ''}</strong>
             </div>
             """, unsafe_allow_html=True)
 
-# ========== 原有界面 ==========
-def show_entry():
-    st.header("📝 录入错题")
-
-    # 初始化 session_state
-    if "ocr_result" not in st.session_state:
-        st.session_state.ocr_result = ""          # 存储识别结果
-    if "processing" not in st.session_state:
-        st.session_state.processing = False
-    if "last_file" not in st.session_state:
-        st.session_state.last_file = None
-
-    uploaded_file = st.file_uploader("🖼️ 上传题目图片", type=["jpg","jpeg","png"])
-
-    col1, col2 = st.columns(2)
-    with col1:
-        if uploaded_file:
-            st.image(uploaded_file, width=300)
-            # 检测新文件，清空旧的识别结果
-            if st.session_state.last_file != uploaded_file.name:
-                st.session_state.ocr_result = ""
-                st.session_state.last_file = uploaded_file.name
-            
-            # 识别按钮
-            if st.button("🔍 识别图片文字", disabled=st.session_state.processing):
-                st.session_state.processing = True
-                with st.spinner("识别中，请稍候..."):
-                    raw = recognize_text_from_image(uploaded_file.getvalue())
-                    if raw and "未识别" not in raw:
-                        st.session_state.ocr_result = raw
-                        st.success("✅ 识别成功！请复制下面的识别结果，粘贴到右侧编辑框中。")
-                    else:
-                        st.error(f"识别失败：{raw}")
-                st.session_state.processing = False
-                st.rerun()
-            
-            # 显示识别结果（带复制按钮的效果）
-            if st.session_state.ocr_result:
-                st.markdown("**📋 识别结果（点击下方框内全选复制）**")
-                st.text_area(
-                    "识别文本",
-                    value=st.session_state.ocr_result,
-                    height=150,
-                    key="ocr_display",
-                    help="点击文本框内，按 Ctrl+A 全选，然后 Ctrl+C 复制"
-                )
-                st.info("💡 提示：选中上面的文字，按 Ctrl+C 复制，然后粘贴到右侧编辑框")
-
-    with col2:
-        st.subheader("✏️ 可编辑题目内容")
-        edited = st.text_area(
-            "请在此处粘贴或手动输入题目", 
-            value="", 
-            height=300, 
-            key="question_editor",
-            help="可以手动输入题目，或从左侧复制识别结果粘贴到这里"
-        )
-
-    # 录入表单
-    with st.form("entry_form"):
-        question_text = edited  # 直接使用编辑框的内容
-        wrong_answer = st.text_input("❌ 你的错误答案")
-        correct_answer = st.text_input("✅ 正确答案")
-        knowledge_options = ["四则运算", "小数意义", "三角形", "小数加减法", "观察物体", "运算定律", "统计", "数学广角", "其他"]
-        knowledge_point = st.selectbox("🏷️ 知识点标签", knowledge_options)
-        if knowledge_point == "其他":
-            knowledge_point = st.text_input("请输入自定义知识点")
-        error_type = st.radio("⚠️ 错误原因", ["概念错误", "计算失误", "审题不清"], horizontal=True)
-
-        submitted = st.form_submit_button("📌 保存错题")
-        if submitted:
-            if not question_text:
-                st.warning("请填写题目文本")
-            elif not correct_answer:
-                st.warning("请填写正确答案")
-            else:
-                img_path = None
-                if uploaded_file:
-                    img_path = os.path.join(UPLOAD_DIR, uploaded_file.name)
-                    with open(img_path, "wb") as f:
-                        f.write(uploaded_file.getvalue())
-                add_question(question_text, wrong_answer, correct_answer, knowledge_point, error_type, img_path)
-                # 清空状态
-                st.session_state.ocr_result = ""
-                st.session_state.last_file = None
-                st.success("错题已保存！")
-                st.rerun()
-
-def show_list():
-    st.header("📚 我的错题本")
-    questions = get_all_questions()
-    if not questions:
-        st.info("暂无错题，快去录入吧～")
-        return
-    for q in questions:
-        qid, qtext, wans, cans, kp, err, img, ct = q
-        time_str = datetime.datetime.strptime(ct, "%Y-%m-%d %H:%M:%S.%f").strftime("%Y-%m-%d %H:%M")
-        with st.container():
-            st.markdown(f"""
-            <div class="question-card">
-                <h3>📌 错题 #{qid}</h3>
-                <p><strong>题目：</strong>{qtext}</p>
-                <p><strong>错误答案：</strong>{wans or '未填写'}</p>
-                <p><strong>正确答案：</strong>{cans}</p>
-                <p><strong>知识点：</strong>{kp} &nbsp; <strong>错误原因：</strong>{err}</p>
-                <p><strong>时间：</strong>{time_str}</p>
-            </div>
-            """, unsafe_allow_html=True)
-            col1, col2 = st.columns([1,5])
-            with col1:
-                if st.button(f"💡 举一反三", key=f"sim_btn_{qid}"):
-                    with st.spinner("生成中..."):
-                        sims = generate_similar_questions(qtext)
-                        if sims:
-                            st.session_state[f"sim_result_{qid}"] = sims
-                        else:
-                            st.warning("生成失败")
-            with col2:
-                if st.button(f"🗑️ 删除", key=f"del_{qid}"):
-                    delete_question(qid)
-                    st.rerun()
-            if f"sim_result_{qid}" in st.session_state:
-                st.markdown("**✨ 举一反三**")
-                for i, s in enumerate(st.session_state[f"sim_result_{qid}"],1):
-                    st.markdown(f"{i}. {s}")
-                st.markdown("---")
-        st.divider()
-
-def show_generate():
-    st.header("📚 智能复习与总结")
-    tab1, tab2, tab3, tab4 = st.tabs(["每周回顾", "两周综合卷", "思维导图", "记忆口诀"])
-    all_questions = get_all_questions()
-    if not all_questions:
-        for tab in [tab1,tab2,tab3,tab4]:
-            with tab: st.info("暂无错题数据")
-        return
-    df = pd.DataFrame(all_questions, columns=["id","q","wa","ca","kp","err","img","ct"])
-    df["ct"] = pd.to_datetime(df["ct"])
-    today = datetime.datetime.now()
-    start_week = (today - timedelta(days=today.weekday())).replace(hour=0,minute=0,second=0)
-    two_weeks_ago = today - timedelta(days=14)
-    week_q = df[(df["ct"]>=start_week) & (df["ct"]<=today)]
-    two_q = df[(df["ct"]>=two_weeks_ago) & (df["ct"]<=today)]
-    with tab1:
-        if st.button("生成本周回顾"):
-            st.markdown(generate_weekly_review(week_q.to_records(index=False)))
-    with tab2:
-        if st.button("生成两周综合卷"):
-            st.markdown(generate_two_week_paper(two_q.to_records(index=False)))
-    with tab3:
-        if st.button("生成思维导图"):
-            code = generate_mind_map(all_questions)
-            st.markdown(f"```mermaid\n{code}\n```")
-    with tab4:
-        if st.button("生成记忆口诀"):
-            st.markdown(generate_memory_mnemonics(all_questions))
-
-# ========== 主程序 ==========
 def main():
     init_db()
     st.sidebar.title("📋 功能菜单")
-    # 使用 session_state 记住当前菜单，默认为“主页”
     if "menu" not in st.session_state:
         st.session_state.menu = "主页"
     menu_options = ["主页", "录入错题", "错题本", "智能复习与总结"]

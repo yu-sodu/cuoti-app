@@ -1,0 +1,10 @@
+Windows PowerShell本地鱼Github同步的命令：
+cd D:\cuoti_app
+git init
+git remote add origin https://github.com/yu-sodu/cuoti-app.git
+git add .
+git commit -m "优化图片识别逻辑，改为手动复制粘贴"
+git push -u origin main
+
+git config --global user.name "yu-sodu"
+git config --global user.email "250248538@qq.com"
