@@ -9,7 +9,6 @@ import io
 import pandas as pd
 from datetime import timedelta
 import numpy as np
-import easyocr
 import re
 
 # ========== 页面配置 ==========
@@ -59,6 +58,7 @@ UPLOAD_DIR = "uploads"
 Path(UPLOAD_DIR).mkdir(exist_ok=True)
 
 def init_db():
+    """初始化数据库，自动添加缺失字段"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS wrong_questions (
@@ -71,13 +71,11 @@ def init_db():
         image_path TEXT,
         created_at TIMESTAMP,
         solution TEXT DEFAULT '')''')
-    
     # 检查并添加 solution 字段（兼容旧数据库）
     c.execute("PRAGMA table_info(wrong_questions)")
     columns = [col[1] for col in c.fetchall()]
     if "solution" not in columns:
         c.execute('ALTER TABLE wrong_questions ADD COLUMN solution TEXT DEFAULT ""')
-    
     conn.commit()
     conn.close()
 
@@ -98,14 +96,6 @@ def update_solution(qid, solution):
     conn.commit()
     conn.close()
 
-def get_solution(qid):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT solution FROM wrong_questions WHERE id = ?', (qid,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else ""
-
 def get_all_questions():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -121,7 +111,7 @@ def delete_question(qid):
     conn.commit()
     conn.close()
 
-# ========== AI 和 OCR ==========
+# ========== AI 调用 ==========
 def get_api_key():
     try:
         return st.secrets["DEEPSEEK_API_KEY"]
@@ -144,30 +134,42 @@ def call_deepseek_chat(messages, temperature=0.7):
         st.error(f"API 调用失败: {e}")
         return None
 
+# ========== OCR 可选（云端优化版）==========
 @st.cache_resource
 def load_easyocr():
-    return easyocr.Reader(['ch_sim', 'en'], gpu=False)
+    """加载 EasyOCR，若失败则返回 None，避免应用崩溃"""
+    try:
+        import easyocr
+        # 静默加载，减少控制台输出
+        reader = easyocr.Reader(['ch_sim', 'en'], gpu=False, verbose=False)
+        return reader
+    except Exception as e:
+        # 不显示错误弹窗，只在侧边栏提示
+        if "ocr_available" not in st.session_state:
+            st.session_state.ocr_available = False
+            st.session_state.ocr_error = str(e)
+        return None
 
 def recognize_text_from_image(image_bytes):
+    """识别图片，如果 OCR 不可用则返回提示"""
+    reader = load_easyocr()
+    if reader is None:
+        return "【OCR 服务暂不可用（网络问题或模型下载失败），请手动输入题目】"
     try:
-        reader = load_easyocr()
         result = reader.readtext(image_bytes)
         if not result:
-            return "未识别到任何文字"
+            return "未识别到文字"
         texts = [item[1] for item in result if item[1].strip()]
         return "\n".join(texts) if texts else "未识别到有效文字"
     except Exception as e:
-        st.error(f"OCR错误: {e}")
-        return ""
+        return f"识别出错：{e}，请手动输入"
 
 # ========== AI 解题函数 ==========
 def solve_math_problem(question_text, wrong_answer=None, error_type=None):
     if not question_text:
         return "请先输入题目内容"
-    
     wrong_hint = f"\n注意：学生的错误答案是「{wrong_answer}」，请针对这个错误进行重点讲解。" if wrong_answer else ""
     error_hint = f"\n学生的错误原因：{error_type}，请针对这个原因给出改进建议。" if error_type else ""
-    
     prompt = f"""你是一位耐心、亲切的小学数学老师。请为下面这道数学题提供详细的解题思路和步骤。
 
 题目：{question_text}{wrong_hint}{error_hint}
@@ -208,15 +210,7 @@ def generate_weekly_review(questions_week):
 def generate_two_week_paper(questions_two_weeks):
     if len(questions_two_weeks)==0: return "过去两周无错题"
     qlist = "\n".join([f"{i+1}. {q[1]}" for i,q in enumerate(questions_two_weeks)])
-    prompt = f"""根据以下错题，生成一套10道题的综合练习卷（含答案）。要求：
-1. 题目难度适中，题型多样（填空题、选择题、计算题、应用题等）
-2. 每道题都要标注对应的知识点
-3. 最后附上答案
-4. 使用清晰易读的格式
-
-原始错题列表：
-{qlist}
-"""
+    prompt = f"根据以下错题，生成一套10道题的综合练习卷（含答案）。要求：题目难度适中，题型多样，最后附上答案。\n{qlist}"
     return call_deepseek_chat([{"role": "user", "content": prompt}], temperature=0.7) or "生成失败"
 
 def generate_mind_map(questions):
@@ -234,26 +228,19 @@ def generate_memory_mnemonics(questions):
     prompt = f"为知识点{', '.join(top)}编写记忆口诀（每个口诀不超过4句）"
     return call_deepseek_chat([{"role": "user", "content": prompt}], temperature=0.8) or "生成失败"
 
-# ========== 试卷打印辅助函数 ==========
 def convert_to_printable_html(paper_text, title="综合练习卷"):
     """将 AI 生成的试卷内容转换为适合打印的 HTML 格式"""
     html_content = paper_text
-    
     # 处理 Markdown 标题
     html_content = re.sub(r'^# (.*?)$', r'<h1>\1</h1>', html_content, flags=re.MULTILINE)
     html_content = re.sub(r'^## (.*?)$', r'<h2>\1</h2>', html_content, flags=re.MULTILINE)
     html_content = re.sub(r'^### (.*?)$', r'<h3>\1</h3>', html_content, flags=re.MULTILINE)
-    
     # 处理粗体
     html_content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html_content)
-    
     # 处理列表项
     html_content = re.sub(r'^\d+\.\s+(.*?)$', r'<li>\1</li>', html_content, flags=re.MULTILINE)
     html_content = re.sub(r'^- (.*?)$', r'<li>\1</li>', html_content, flags=re.MULTILINE)
-    
-    # 将连续的列表项包装在 <ul> 或 <ol> 中
     html_content = re.sub(r'(<li>.*?</li>\n?)+', lambda m: f'<ul>{m.group(0)}</ul>', html_content)
-    
     # 处理段落
     lines = html_content.split('\n')
     processed_lines = []
@@ -263,43 +250,25 @@ def convert_to_printable_html(paper_text, title="综合练习卷"):
             processed_lines.append(f'<p>{line}</p>')
         elif line:
             processed_lines.append(line)
-    
     html_content = '\n'.join(processed_lines)
-    
     return f'''<!DOCTYPE html>
 <html>
-<head>
-    <meta charset="UTF-8">
-    <title>{title}</title>
-    <style>
-        @media print {{
-            body {{ margin: 2cm; font-size: 12pt; }}
-            .no-print {{ display: none; }}
-            h1, h2, h3 {{ page-break-after: avoid; }}
-            ul, ol, p {{ page-break-inside: avoid; }}
-        }}
-        @media screen {{
-            body {{ max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f5f5f5; }}
-            .paper {{ background-color: white; padding: 40px; border-radius: 10px; box-shadow: 0 5px 20px rgba(0,0,0,0.1); }}
-        }}
-        body {{ font-family: "Microsoft YaHei", "SimHei", "PingFang SC", sans-serif; line-height: 1.6; color: #333; }}
-        h1 {{ text-align: center; color: #2c5f2d; margin-bottom: 30px; }}
-        h2 {{ color: #2c5f2d; border-bottom: 2px solid #c8e7d5; padding-bottom: 8px; margin-top: 25px; }}
-        h3 {{ color: #ffb347; margin-top: 20px; }}
-        .answer-section {{ margin-top: 40px; padding: 20px; background-color: #f9f7f3; border-left: 5px solid #ffb347; }}
-        .no-print {{ text-align: center; margin-top: 20px; }}
-        button {{ background-color: #2c5f2d; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 14px; }}
-        button:hover {{ background-color: #1e401f; }}
-    </style>
+<head><meta charset="UTF-8"><title>{title}</title>
+<style>
+    @media print {{ body {{ margin: 2cm; font-size: 12pt; }} .no-print {{ display: none; }} }}
+    @media screen {{ body {{ max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f5f5f5; }}
+    .paper {{ background-color: white; padding: 40px; border-radius: 10px; box-shadow: 0 5px 20px rgba(0,0,0,0.1); }} }}
+    body {{ font-family: "Microsoft YaHei", "SimHei", sans-serif; line-height: 1.6; color: #333; }}
+    h1 {{ text-align: center; color: #2c5f2d; }} h2 {{ color: #2c5f2d; border-bottom: 2px solid #c8e7d5; }}
+    button {{ background-color: #2c5f2d; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; }}
+</style>
 </head>
 <body>
-    <div class="paper">
-        {html_content}
-    </div>
-    <div class="no-print" style="text-align: center; margin-top: 20px;">
-        <button onclick="window.print();">🖨️ 打印试卷</button>
-        <button onclick="window.close();" style="margin-left: 10px;">关闭窗口</button>
-    </div>
+<div class="paper">{html_content}</div>
+<div class="no-print" style="text-align:center; margin-top:20px;">
+<button onclick="window.print();">🖨️ 打印试卷</button>
+<button onclick="window.close();" style="margin-left:10px;">关闭窗口</button>
+</div>
 </body>
 </html>'''
 
@@ -307,6 +276,7 @@ def convert_to_printable_html(paper_text, title="综合练习卷"):
 def show_entry():
     st.header("📝 录入错题")
 
+    # 初始化 session_state
     if "ocr_result" not in st.session_state:
         st.session_state.ocr_result = ""
     if "processing" not in st.session_state:
@@ -334,7 +304,7 @@ def show_entry():
                 st.session_state.processing = True
                 with st.spinner("识别中，请稍候..."):
                     raw = recognize_text_from_image(uploaded_file.getvalue())
-                    if raw and "未识别" not in raw:
+                    if raw and "未识别" not in raw and "OCR 服务暂不可用" not in raw:
                         st.session_state.ocr_result = raw
                         st.success("✅ 识别成功！请复制下面的识别结果，粘贴到右侧编辑框中。")
                     else:
@@ -403,10 +373,7 @@ def show_entry():
             key="custom_error_input"
         )
         st.session_state.custom_error = custom_error
-        if custom_error:
-            final_error_type = f"其他：{custom_error}"
-        else:
-            final_error_type = "其他（未填写具体原因）"
+        final_error_type = f"其他：{custom_error}" if custom_error else "其他（未填写具体原因）"
     else:
         final_error_type = selected_error
         st.session_state.custom_error = ""
@@ -689,6 +656,7 @@ def main():
         st.sidebar.success("✅ AI 助手已就绪")
     else:
         st.sidebar.error("❌ 未配置 API Key")
+        st.sidebar.info("请在 .streamlit/secrets.toml 中设置 DEEPSEEK_API_KEY 或配置环境变量")
 
     if selected == "主页":
         show_welcome()

@@ -3,8 +3,21 @@ cd D:\cuoti_app
 git init
 git remote add origin https://github.com/yu-sodu/cuoti-app.git
 git add .
-git commit -m "优化图片识别逻辑，改为手动复制粘贴"
+git commit -m "1.增加AI解题；2.生成两周综合卷的打印"
 git push -u origin main
+如果不在main可以尝试master
+git push -u origin master
 
+注意：第一次配置会出现如下情况（要输入github的用户名和邮箱）
 git config --global user.name "yu-sodu"
 git config --global user.email "250248538@qq.com"
+
+万能更新，以后更新可以用以下的（Windows PowerShell输入）：
+# 1. 把修改的文件加入暂存区
+git add .
+
+# 2. 提交修改（引号里写你这次改了什么）
+git commit -m "这里写你的修改说明，比如：修复打印功能bug"
+
+# 3. 推送到GitHub，Streamlit会自动更新
+git push
