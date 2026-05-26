@@ -144,14 +144,16 @@ IN_CLOUD = (os.path.exists('/mount/src') or
 def get_tencent_ocr_client():
     """使用 Streamlit Cloud 的 secrets 获取密钥并初始化客户端"""
     try:
-        # 从 secrets.toml 获取密钥
+        print("正在尝试从 st.secrets 读取密钥...")
         secret_id = st.secrets["TENCENTCLOUD_SECRET_ID"]
         secret_key = st.secrets["TENCENTCLOUD_SECRET_KEY"]
+        print("成功读取密钥，开始初始化客户端...")
         cred = credential.Credential(secret_id, secret_key)
-        # 指定广州区域，你也可以改为 'ap-beijing' 等
         client = ocr_client.OcrClient(cred, "ap-guangzhou")
+        print("客户端初始化成功！")
         return client
     except Exception as e:
+        print(f"初始化失败，错误详情: {e}")
         st.warning(f"腾讯云 OCR 初始化失败: {e}")
         return None
 
