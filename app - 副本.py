@@ -136,59 +136,22 @@ def call_deepseek_chat(messages, temperature=0.7):
         st.error(f"API 调用失败: {e}")
         return None
 
-# ========== OCR 识别（云端使用腾讯云，本地使用 EasyOCR）==========
-IN_CLOUD = (os.path.exists('/mount/src') or 
-            os.environ.get('STREAMLIT_CLOUD', '').lower() == 'true' or
-            'STREAMLIT_SHARING_MODE' in os.environ)
-
-def get_tencent_ocr_client():
-    """使用 Streamlit Cloud 的 secrets 获取密钥并初始化客户端"""
-    try:
-        # 从 secrets.toml 获取密钥
-        secret_id = st.secrets["TENCENTCLOUD_SECRET_ID"]
-        secret_key = st.secrets["TENCENTCLOUD_SECRET_KEY"]
-        cred = credential.Credential(secret_id, secret_key)
-        # 指定广州区域，你也可以改为 'ap-beijing' 等
-        client = ocr_client.OcrClient(cred, "ap-guangzhou")
-        return client
-    except Exception as e:
-        st.warning(f"腾讯云 OCR 初始化失败: {e}")
-        return None
-
-def recognize_text_from_image(image_bytes):
-    # 云端环境使用腾讯云 OCR
-    if IN_CLOUD:
+# ========== OCR 识别（云端自动禁用）==========
+if IN_CLOUD:
+    def recognize_text_from_image(image_bytes):
+        return "【云端暂不支持图片识别，请手动输入题目】"
+else:
+    @st.cache_resource
+    def load_easyocr():
         try:
-            client = get_tencent_ocr_client()
-            if client is None:
-                return "【腾讯云 OCR 初始化失败，请检查密钥配置】"
-
-            # 构建请求
-            req = models.GeneralBasicOCRRequest()
-            # 将图片转为 Base64 编码
-            img_base64 = base64.b64encode(image_bytes).decode()
-            req.ImageBase64 = img_base64
-            
-            # 可选：如需识别手写体，可取消下面一行的注释
-            # req.EnableWordPolygon = True
-
-            # 调用 API
-            resp = client.GeneralBasicOCR(req)
-            
-            if resp.TextDetections:
-                # 将每行识别结果用换行符连接
-                texts = [item.DetectedText for item in resp.TextDetections]
-                return "\n".join(texts)
-            else:
-                return "未识别到任何文字"
-                
+            import easyocr
+            reader = easyocr.Reader(['ch_sim', 'en'], gpu=False, verbose=False)
+            return reader
         except Exception as e:
-            # 详细错误信息会打印到日志，页面上只显示友好提示
-            print(f"腾讯云 OCR 调用失败: {e}")
-            return "【腾讯云 OCR 调用失败，请稍后重试】"
-    
-    # 本地环境使用 EasyOCR
-    else:
+            st.warning(f"EasyOCR 初始化失败: {e}，将禁用图片识别功能")
+            return None
+
+    def recognize_text_from_image(image_bytes):
         reader = load_easyocr()
         if reader is None:
             return "【OCR 服务不可用，请手动输入题目】"
