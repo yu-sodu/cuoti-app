@@ -11,10 +11,14 @@ from datetime import timedelta
 import numpy as np
 import re
 
+# ========== 环境检测（云端自动禁用 OCR）==========
+IN_CLOUD = (os.path.exists('/mount/src') or 
+            os.environ.get('STREAMLIT_CLOUD', '').lower() == 'true' or
+            'STREAMLIT_SHARING_MODE' in os.environ)
+
 # ========== 页面配置 ==========
 st.set_page_config(page_title="余悦错题本", page_icon="📚", layout="wide")
 
-# 自定义CSS
 st.markdown("""
 <style>
     .stApp { background-color: #f9f7f3; }
@@ -58,7 +62,6 @@ UPLOAD_DIR = "uploads"
 Path(UPLOAD_DIR).mkdir(exist_ok=True)
 
 def init_db():
-    """初始化数据库，自动添加缺失字段"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS wrong_questions (
@@ -71,7 +74,6 @@ def init_db():
         image_path TEXT,
         created_at TIMESTAMP,
         solution TEXT DEFAULT '')''')
-    # 检查并添加 solution 字段（兼容旧数据库）
     c.execute("PRAGMA table_info(wrong_questions)")
     columns = [col[1] for col in c.fetchall()]
     if "solution" not in columns:
@@ -134,35 +136,33 @@ def call_deepseek_chat(messages, temperature=0.7):
         st.error(f"API 调用失败: {e}")
         return None
 
-# ========== OCR 可选（云端优化版）==========
-@st.cache_resource
-def load_easyocr():
-    """加载 EasyOCR，若失败则返回 None，避免应用崩溃"""
-    try:
-        import easyocr
-        # 静默加载，减少控制台输出
-        reader = easyocr.Reader(['ch_sim', 'en'], gpu=False, verbose=False)
-        return reader
-    except Exception as e:
-        # 不显示错误弹窗，只在侧边栏提示
-        if "ocr_available" not in st.session_state:
-            st.session_state.ocr_available = False
-            st.session_state.ocr_error = str(e)
-        return None
+# ========== OCR 识别（云端自动禁用）==========
+if IN_CLOUD:
+    def recognize_text_from_image(image_bytes):
+        return "【云端暂不支持图片识别，请手动输入题目】"
+else:
+    @st.cache_resource
+    def load_easyocr():
+        try:
+            import easyocr
+            reader = easyocr.Reader(['ch_sim', 'en'], gpu=False, verbose=False)
+            return reader
+        except Exception as e:
+            st.warning(f"EasyOCR 初始化失败: {e}，将禁用图片识别功能")
+            return None
 
-def recognize_text_from_image(image_bytes):
-    """识别图片，如果 OCR 不可用则返回提示"""
-    reader = load_easyocr()
-    if reader is None:
-        return "【OCR 服务暂不可用（网络问题或模型下载失败），请手动输入题目】"
-    try:
-        result = reader.readtext(image_bytes)
-        if not result:
-            return "未识别到文字"
-        texts = [item[1] for item in result if item[1].strip()]
-        return "\n".join(texts) if texts else "未识别到有效文字"
-    except Exception as e:
-        return f"识别出错：{e}，请手动输入"
+    def recognize_text_from_image(image_bytes):
+        reader = load_easyocr()
+        if reader is None:
+            return "【OCR 服务不可用，请手动输入题目】"
+        try:
+            result = reader.readtext(image_bytes)
+            if not result:
+                return "未识别到文字"
+            texts = [item[1] for item in result if item[1].strip()]
+            return "\n".join(texts) if texts else "未识别到有效文字"
+        except Exception as e:
+            return f"识别出错：{e}，请手动输入"
 
 # ========== AI 解题函数 ==========
 def solve_math_problem(question_text, wrong_answer=None, error_type=None):
@@ -229,19 +229,14 @@ def generate_memory_mnemonics(questions):
     return call_deepseek_chat([{"role": "user", "content": prompt}], temperature=0.8) or "生成失败"
 
 def convert_to_printable_html(paper_text, title="综合练习卷"):
-    """将 AI 生成的试卷内容转换为适合打印的 HTML 格式"""
     html_content = paper_text
-    # 处理 Markdown 标题
     html_content = re.sub(r'^# (.*?)$', r'<h1>\1</h1>', html_content, flags=re.MULTILINE)
     html_content = re.sub(r'^## (.*?)$', r'<h2>\1</h2>', html_content, flags=re.MULTILINE)
     html_content = re.sub(r'^### (.*?)$', r'<h3>\1</h3>', html_content, flags=re.MULTILINE)
-    # 处理粗体
     html_content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html_content)
-    # 处理列表项
     html_content = re.sub(r'^\d+\.\s+(.*?)$', r'<li>\1</li>', html_content, flags=re.MULTILINE)
     html_content = re.sub(r'^- (.*?)$', r'<li>\1</li>', html_content, flags=re.MULTILINE)
     html_content = re.sub(r'(<li>.*?</li>\n?)+', lambda m: f'<ul>{m.group(0)}</ul>', html_content)
-    # 处理段落
     lines = html_content.split('\n')
     processed_lines = []
     for line in lines:
