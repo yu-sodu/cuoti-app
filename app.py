@@ -141,60 +141,50 @@ IN_CLOUD = (os.path.exists('/mount/src') or
             os.environ.get('STREAMLIT_CLOUD', '').lower() == 'true' or
             'STREAMLIT_SHARING_MODE' in os.environ)
 
-def get_tencent_ocr_client():
-    try:
-        print("DEBUG: 开始读取 Secrets", flush=True)
-        secret_id = st.secrets["TENCENTCLOUD_SECRET_ID"]
-        secret_key = st.secrets["TENCENTCLOUD_SECRET_KEY"]
-        print(f"DEBUG: Secret ID 前4位: {secret_id[:4]}", flush=True)
-        print("DEBUG: 初始化 Credential 对象", flush=True)
-        cred = credential.Credential(secret_id, secret_key)
-        print("DEBUG: 创建 OcrClient", flush=True)
-        client = ocr_client.OcrClient(cred, "ap-guangzhou")
-        print("DEBUG: 腾讯云 OCR 客户端创建成功", flush=True)
-        return client
-    except Exception as e:
-        # 将详细错误信息打印到日志并返回给前端
-        error_msg = f"腾讯云 OCR 初始化失败: {type(e).__name__} - {str(e)}"
-        print(error_msg, flush=True)
-        st.warning(error_msg)
-        return None
-
 def recognize_text_from_image(image_bytes):
-    # 云端环境使用腾讯云 OCR
+    """云端使用腾讯云 OCR，本地使用 EasyOCR"""
     if IN_CLOUD:
         try:
-            client = get_tencent_ocr_client()
-            if client is None:
-                return "【腾讯云 OCR 初始化失败，请检查密钥配置】"
-            # 后面加 try...except 捕获 API 调用错误
-
+            # 在函数内部导入，确保模块可用
+            import base64
+            from tencentcloud.common import credential
+            from tencentcloud.ocr.v20181119 import ocr_client, models
+            
+            # 读取密钥
+            secret_id = st.secrets["TENCENTCLOUD_SECRET_ID"]
+            secret_key = st.secrets["TENCENTCLOUD_SECRET_KEY"]
+            cred = credential.Credential(secret_id, secret_key)
+            client = ocr_client.OcrClient(cred, "ap-guangzhou")
+            
             # 构建请求
             req = models.GeneralBasicOCRRequest()
-            # 将图片转为 Base64 编码
             img_base64 = base64.b64encode(image_bytes).decode()
             req.ImageBase64 = img_base64
-            
-            # 可选：如需识别手写体，可取消下面一行的注释
+            # 可选：如需识别手写体，取消下面注释
             # req.EnableWordPolygon = True
-
-            # 调用 API
-            resp = client.GeneralBasicOCR(req)
             
+            resp = client.GeneralBasicOCR(req)
             if resp.TextDetections:
-                # 将每行识别结果用换行符连接
                 texts = [item.DetectedText for item in resp.TextDetections]
                 return "\n".join(texts)
             else:
                 return "未识别到任何文字"
-                
         except Exception as e:
-            # 详细错误信息会打印到日志，页面上只显示友好提示
             print(f"腾讯云 OCR 调用失败: {e}")
             return "【腾讯云 OCR 调用失败，请稍后重试】"
     
     # 本地环境使用 EasyOCR
     else:
+        @st.cache_resource
+        def load_easyocr():
+            try:
+                import easyocr
+                reader = easyocr.Reader(['ch_sim', 'en'], gpu=False, verbose=False)
+                return reader
+            except Exception as e:
+                st.warning(f"EasyOCR 初始化失败: {e}，将禁用图片识别功能")
+                return None
+
         reader = load_easyocr()
         if reader is None:
             return "【OCR 服务不可用，请手动输入题目】"
