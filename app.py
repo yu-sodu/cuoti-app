@@ -142,28 +142,28 @@ IN_CLOUD = (os.path.exists('/mount/src') or
             'STREAMLIT_SHARING_MODE' in os.environ)
 
 def recognize_text_from_image(image_bytes):
-    """云端使用腾讯云 OCR，本地使用 EasyOCR"""
+    """云端使用腾讯云OCR（高精度版），本地使用 EasyOCR"""
     if IN_CLOUD:
         try:
-            # 在函数内部导入，确保模块可用
             import base64
             from tencentcloud.common import credential
             from tencentcloud.ocr.v20181119 import ocr_client, models
-            
+
             # 读取密钥
             secret_id = st.secrets["TENCENTCLOUD_SECRET_ID"]
             secret_key = st.secrets["TENCENTCLOUD_SECRET_KEY"]
             cred = credential.Credential(secret_id, secret_key)
             client = ocr_client.OcrClient(cred, "ap-guangzhou")
-            
-            # 构建请求
-            req = models.GeneralBasicOCRRequest()
+
+            # 构建高精度版请求
+            req = models.GeneralAccurateOCRRequest()
             img_base64 = base64.b64encode(image_bytes).decode()
             req.ImageBase64 = img_base64
-            # 可选：如需识别手写体，取消下面注释
-            # req.EnableWordPolygon = True
-            
-            resp = client.GeneralBasicOCR(req)
+
+            # 建议：开启切片检测，提升识别准确率
+            # req.EnableDetectSplit = True
+
+            resp = client.GeneralAccurateOCR(req)
             if resp.TextDetections:
                 texts = [item.DetectedText for item in resp.TextDetections]
                 return "\n".join(texts)
@@ -172,6 +172,8 @@ def recognize_text_from_image(image_bytes):
         except Exception as e:
             print(f"腾讯云 OCR 调用失败: {e}")
             return "【腾讯云 OCR 调用失败，请稍后重试】"
+    
+    # 本地环境使用 EasyOCR 的代码保持不变...
     
     # 本地环境使用 EasyOCR
     else:
