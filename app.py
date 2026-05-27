@@ -142,19 +142,22 @@ IN_CLOUD = (os.path.exists('/mount/src') or
             'STREAMLIT_SHARING_MODE' in os.environ)
 
 def get_tencent_ocr_client():
-    """使用 Streamlit Cloud 的 secrets 获取密钥并初始化客户端"""
     try:
-        print("正在尝试从 st.secrets 读取密钥...")
+        print("DEBUG: 开始读取 Secrets", flush=True)
         secret_id = st.secrets["TENCENTCLOUD_SECRET_ID"]
         secret_key = st.secrets["TENCENTCLOUD_SECRET_KEY"]
-        print("成功读取密钥，开始初始化客户端...")
+        print(f"DEBUG: Secret ID 前4位: {secret_id[:4]}", flush=True)
+        print("DEBUG: 初始化 Credential 对象", flush=True)
         cred = credential.Credential(secret_id, secret_key)
+        print("DEBUG: 创建 OcrClient", flush=True)
         client = ocr_client.OcrClient(cred, "ap-guangzhou")
-        print("客户端初始化成功！")
+        print("DEBUG: 腾讯云 OCR 客户端创建成功", flush=True)
         return client
     except Exception as e:
-        print(f"初始化失败，错误详情: {e}")
-        st.warning(f"腾讯云 OCR 初始化失败: {e}")
+        # 将详细错误信息打印到日志并返回给前端
+        error_msg = f"腾讯云 OCR 初始化失败: {type(e).__name__} - {str(e)}"
+        print(error_msg, flush=True)
+        st.warning(error_msg)
         return None
 
 def recognize_text_from_image(image_bytes):
@@ -164,6 +167,7 @@ def recognize_text_from_image(image_bytes):
             client = get_tencent_ocr_client()
             if client is None:
                 return "【腾讯云 OCR 初始化失败，请检查密钥配置】"
+            # 后面加 try...except 捕获 API 调用错误
 
             # 构建请求
             req = models.GeneralBasicOCRRequest()
